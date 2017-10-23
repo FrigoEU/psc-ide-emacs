@@ -320,6 +320,30 @@ Defaults to \"output/\" and should only be changed with
                           ""
                           "if" "then" "else" "where" "let" "import") id))))
 
+(defun psc-ide-load-file-environment-into-psci ()
+  (interactive)
+  (require 'psci)
+  (save-excursion
+    (psci 1))
+  (psci/--run-psci-command! ":clear")
+  (psci/load-module!)
+  ; Load imports of the current file into psci
+  (let ((imports (-filter
+                 (lambda (str) (s-starts-with? "import" str))
+                 (split-string
+                  (buffer-substring-no-properties (point-min) (point-max))
+                  "\n"))))
+    (dolist (imp imports)
+      (psci/--run-psci-command! imp)))
+  ; Open both windows
+  (psc-ide-init-windows)
+  ; set top window to psci buffer
+  (with-selected-window psc-ide-context-window
+    (let ((psci-buffer (get-buffer-create (psci/--process-name psci/buffer-name))))
+      (set-window-buffer psc-ide-context-window psci-buffer)))
+  (select-window psc-ide-context-window)
+  (set-window-point psc-ide-context-window (point-max)))
+
 (defun psc-ide-goto-definition ()
   "Go to definition of the symbol under cursor."
   (interactive)
