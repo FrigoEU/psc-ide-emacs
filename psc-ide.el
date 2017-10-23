@@ -344,6 +344,18 @@ Defaults to \"output/\" and should only be changed with
   (select-window psc-ide-context-window)
   (set-window-point psc-ide-context-window (point-max)))
 
+(defun psc-ide-wrap-with-type-hole (start end)
+  (interactive "r")
+  (if (equal start end)
+      (let ((ident-span (psc-ide-ident-pos-at-point)))
+        (psc-ide-wrap-with-type-hole-impl (car ident-span) (cdr ident-span)))
+      (psc-ide-wrap-with-type-hole-impl start end))
+  )
+(defun psc-ide-wrap-with-type-hole-impl (start end)
+  (let ((ident (buffer-substring-no-properties start end)))
+    (delete-region start end)
+    (insert (format "((const :: forall a. a -> a -> a) (%s) ?hole)" ident))))
+
 (defun psc-ide-goto-definition ()
   "Go to definition of the symbol under cursor."
   (interactive)
