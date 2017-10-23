@@ -237,7 +237,88 @@ Defaults to \"output/\" and should only be changed with
 (defun psc-ide-show-type (expand)
   "Show type of the symbol under cursor and EXPAND its type synonyms."
   (interactive "P")
-  (psc-ide-show-type-impl (psc-ide-ident-at-point) t expand))
+  (psc-ide-show-type-impl (psc-ide-ident-at-point) t expand t))
+
+(defun psc-ide-init-windows ()
+  "Initialize windows"
+  (let ((context-buffer (get-buffer-create "psc-ide-context"))
+        (history-buffer (get-buffer-create "psc-ide-history")))
+    (setq psc-ide-context-window
+          (popwin:display-buffer (get-buffer-create "psc-ide-context")))
+    ;; (if (or (not (boundp 'psc-ide-context-window))
+    ;;         (not (window-live-p psc-ide-context-window)))
+    ;;     (setq psc-ide-context-window (previous-window)))
+    (if (or (not (boundp 'psc-ide-history-window))
+            (not (window-live-p psc-ide-history-window)))
+        (setq psc-ide-history-window
+              (with-selected-window (get-buffer-window "psc-ide-context")
+               (display-buffer-in-atom-window
+                (get-buffer-create "psc-ide-history")
+                '((side . below))))))
+    (set-window-text-height psc-ide-history-window 16)
+    (with-selected-window psc-ide-context-window
+      (set-window-buffer psc-ide-context-window context-buffer)
+      (set-buffer context-buffer)
+      (erase-buffer)
+      (insert "")
+      (purescript-mode)
+      (flycheck-mode -1)
+      )
+    (with-selected-window psc-ide-history-window
+      (set-window-buffer psc-ide-history-window history-buffer)
+      (set-buffer history-buffer)
+      (erase-buffer)
+      (insert "")
+      (purescript-mode)
+      (flycheck-mode -1)
+      )
+    )
+  (psc-ide-render-history)
+  )
+
+(defun print-to-context (text)
+  (with-current-buffer (get-buffer-create "psc-ide-context")
+    (insert text)))
+
+(defun psc-ide-show-context ()
+  (interactive)
+  (psc-ide-init-windows)
+  (let* ((idents (psc-ide-get-identifiers-for-context nil))
+         (result-map (make-hash-table)))
+    (dolist
+      (ident idents)
+      (progn
+        (map-put result-map ident nil)
+        (psc-ide-get-type-impl
+         ident
+         (lambda (type)
+           (if type
+               (map-put result-map ident (psc-ide-format-type-history type))
+               (map-put result-map ident (concat ident " :: ?")))
+           (if (map-every-p (lambda (key value) value) result-map)
+               (display-result-map result-map))))))))
+
+(defun display-result-map (map)
+  (print-to-context (s-join "\n\n" (map-values map))))
+
+(defun psc-ide-get-identifiers-for-context (expand)
+  (interactive "P")
+  (let ((line (buffer-substring-no-properties
+               (line-beginning-position) (line-end-position) )))
+    (-filter 'psc-ide-identifier-is-good-for-context
+      (-uniq
+        (mapcar 'psc-ide-cleanup-identifier
+          (split-string line "[ \f\t\n\r\v]+"))))))
+(defun psc-ide-cleanup-identifier (id)
+  (replace-regexp-in-string "[][\\\_\(\)\{\}\:\,]" "" id))
+(defun psc-ide-identifier-is-good-for-context (id)
+  (and (not (s-starts-with? "\"" id))
+       (not (equal 1 (length id)))
+       (not (-contains? '("=" "->" "--" "<-" ","
+                          "$" "#"
+                          "true" "false"
+                          ""
+                          "if" "then" "else" "where" "let" "import") id))))
 
 (defun psc-ide-goto-definition ()
   "Go to definition of the symbol under cursor."
@@ -604,22 +685,53 @@ PARSED-IMPORTS are used to annotate the COMPLETION with qualifiers."
               (forward-char (1- column)))
           (message (format "No position information for %s" search)))))))
 
-(defun psc-ide-show-type-impl (search &optional warn expand)
+(defun psc-ide-format-type-full (type expand)
+  (let-alist type
+    (format "%s.%s ::\n  %s"
+            .module
+            .identifier
+            (if expand .expandedType .type))))
+
+(defun psc-ide-get-type-impl (search cb)
+  (let ((handler (lambda (resp)
+                  (let ((result (psc-ide-unwrap-result resp)))
+                    (if (not (zerop (length result)))
+                        (funcall cb (aref result 0))
+                        (funcall cb nil))))))
+    (psc-ide-send (psc-ide-build-type-command search) handler)))
+
+(setq psc-ide-type-history nil)
+(defun psc-ide-add-to-type-history (type)
+  (let ((new-history (-take 5 (cons type psc-ide-type-history))))
+       (setq psc-ide-type-history new-history)
+       (psc-ide-render-history)))
+(defun psc-ide-format-type-history (type)
+  (let-alist type
+    (format "%s %s \n %s"
+            .identifier
+            (concat "(" .module ")")
+            .expandedType
+            )))
+
+(defun psc-ide-render-history ()
+  (with-current-buffer (get-buffer-create "psc-ide-history")
+    (progn
+      (erase-buffer)
+      (dolist (item psc-ide-type-history)
+        (insert (concat (psc-ide-format-type-history item) "\n\n"))))))
+
+(defun psc-ide-show-type-impl (search &optional warn expand to-history)
   "Print a message that describes the type of SEARCH.
 If the type of SEARCH is not found it prints a warning depending
 on whether WARN is true. Optionally EXPANDs type synonyms."
-  (let ((handler
-         (lambda (resp)
-           (let ((result (psc-ide-unwrap-result resp)))
-             (if (not (zerop (length result)))
-               (let-alist (aref result 0)
-                 (message (psc-ide-string-fontified
-                           (format "%s.%s ::\n  %s"
-                                   .module
-                                   .identifier
-                                   (if expand .expandedType .type)))))
-               (when warn (message "Know nothing about type of `%s'." search)))))))
-    (psc-ide-send (psc-ide-build-type-command search) handler)))
+  (psc-ide-get-type-impl
+   search
+   (lambda (type)
+     (if type
+         (progn
+           (when to-history (psc-ide-add-to-type-history type))
+           (message (psc-ide-string-fontified (psc-ide-format-type-full type expand))))
+         (when warn (message "Know nothing about type of `%s'." search))))))
 
 (defun psc-ide-build-type-command (search)
   "Builds a type command from SEARCH."
@@ -671,3 +783,4 @@ on whether WARN is true. Optionally EXPANDs type synonyms."
 (provide 'psc-ide)
 
 ;;; psc-ide.el ends here
+
